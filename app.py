@@ -11,70 +11,124 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="Stock Sentiment Analyzer", layout="wide")
+st.set_page_config(
+    page_title="Stock Sentiment Analyzer",
+    page_icon="📈",
+    layout="wide"
+)
 
-st.title("Stock Sentiment Analyzer")
+st.title("📈 Stock Sentiment Analyzer")
 st.caption("Predicts next day price direction using live news and machine learning")
+st.info("First load may take 30 to 60 seconds on the free server. Subsequent runs are faster.")
 
-ticker = st.text_input("Enter NSE stock ticker", value="RELIANCE.NS").strip().upper()
+# Cached functions 
 
-if st.button("Run Analysis"):
+@st.cache_data(ttl=3600)
+def get_stock_data(ticker):
+    stock = yf.download(ticker, period="1y", interval="1d", progress=False)
+    if stock.empty:
+        return None
+    stock.columns = stock.columns.get_level_values(0)
+    stock = stock[["Close"]].copy()
+    stock["Target"] = (stock["Close"].shift(-1) > stock["Close"]).astype(int)
+    return stock
 
-    with st.spinner("Fetching stock data..."):
-        stock = yf.download(ticker, period="1y", interval="1d", progress=False)
-        stock.columns = stock.columns.get_level_values(0)
-        stock = stock[["Close"]].copy()
-        stock["Target"] = (stock["Close"].shift(-1) > stock["Close"]).astype(int)
+@st.cache_data(ttl=1800)
+def get_headlines(query):
+    rss_url = f"https://news.google.com/rss/search?q={query}+stock+India&hl=en-IN&gl=IN&ceid=IN:en"
+    feed = feedparser.parse(rss_url)
+    headlines = [entry.title for entry in feed.entries[:10]]
+    if not headlines:
+        headlines = [f"{query} stock steady amid market activity"]
+    return headlines
 
-    with st.spinner("Fetching live headlines..."):
-        analyzer = SentimentIntensityAnalyzer()
+# Input 
+
+col_input, col_button = st.columns([3, 1])
+with col_input:
+    ticker = st.text_input("Enter NSE stock ticker", value="RELIANCE.NS", label_visibility="collapsed").strip().upper()
+with col_button:
+    run = st.button("Run Analysis", use_container_width=True)
+
+st.caption("Examples: RELIANCE.NS   TCS.NS   HDFCBANK.NS   INFY.NS   SBIN.NS")
+
+if run:
+
+    if not ticker:
+        st.error("Please enter a stock ticker.")
+        st.stop()
+
+    # Fetch stock data
+    with st.spinner(f"Fetching 1 year of {ticker} price data..."):
+        stock = get_stock_data(ticker)
+
+    if stock is None:
+        st.error(f"Could not fetch data for {ticker}. Please check the ticker and try again.")
+        st.stop()
+
+    # Fetch headlines 
+    with st.spinner("Scraping live news headlines from Google News..."):
         query = ticker.replace(".NS", "").replace(".BO", "")
-        rss_url = f"https://news.google.com/rss/search?q={query}+stock+India&hl=en-IN&gl=IN&ceid=IN:en"
-        feed = feedparser.parse(rss_url)
-        headlines = [entry.title for entry in feed.entries[:10]]
-        if not headlines:
-            headlines = [f"{query} stock steady amid market activity"]
+        headlines = get_headlines(query)
 
-    scores = [analyzer.polarity_scores(h)["compound"] for h in headlines]
-    avg_sentiment = sum(scores) / len(scores)
+    # Sentiment scoring 
+    with st.spinner("Scoring sentiment with VADER NLP..."):
+        analyzer = SentimentIntensityAnalyzer()
+        scores = [analyzer.polarity_scores(h)["compound"] for h in headlines]
+        avg_sentiment = sum(scores) / len(scores)
 
-    stock["Price_Change"] = stock["Close"].pct_change()
-    stock["MA_5"] = stock["Close"].rolling(window=5).mean()
-    stock["MA_20"] = stock["Close"].rolling(window=20).mean()
-    stock["Sentiment"] = avg_sentiment
-    stock = stock.dropna()
-    stock = stock[:-1]
+    # Feature engineering 
+    with st.spinner("Engineering features and training XGBoost model..."):
+        stock["Price_Change"] = stock["Close"].pct_change()
+        stock["MA_5"] = stock["Close"].rolling(window=5).mean()
+        stock["MA_20"] = stock["Close"].rolling(window=20).mean()
+        stock["Sentiment"] = avg_sentiment
+        stock = stock.dropna()
+        stock = stock[:-1]
 
-    features = ["Price_Change", "MA_5", "MA_20", "Sentiment"]
-    X = stock[features]
-    y = stock["Target"]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        features = ["Price_Change", "MA_5", "MA_20", "Sentiment"]
+        X = stock[features]
+        y = stock["Target"]
 
-    model = XGBClassifier(n_estimators=100, random_state=42, eval_metric="logloss")
-    model.fit(X_train, y_train)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
 
-    predictions = model.predict(X_test)
-    accuracy = accuracy_score(y_test, predictions)
+        model = XGBClassifier(n_estimators=100, random_state=42, eval_metric="logloss")
+        model.fit(X_train, y_train)
 
-    latest = stock[features].iloc[-1].values.reshape(1, -1)
-    prediction = model.predict(latest)[0]
-    confidence = model.predict_proba(latest)[0][prediction] * 100
-    direction = "UP" if prediction == 1 else "DOWN"
+        predictions = model.predict(X_test)
+        accuracy = accuracy_score(y_test, predictions)
 
-    # Results 
+        latest = stock[features].iloc[-1].values.reshape(1, -1)
+        prediction = model.predict(latest)[0]
+        confidence = model.predict_proba(latest)[0][prediction] * 100
+        direction = "UP 🟢" if prediction == 1 else "DOWN 🔴"
+
+    st.success("Analysis complete!")
+
+    # Prediction metrics 
     st.subheader(f"Prediction for {ticker}")
     col1, col2, col3 = st.columns(3)
-    col1.metric("Direction", direction)
-    col2.metric("Confidence", f"{confidence:.1f}%")
+    col1.metric("Tomorrow's Direction", direction)
+    col2.metric("Model Confidence", f"{confidence:.1f}%")
     col3.metric("Model Accuracy", f"{accuracy * 100:.2f}%")
+
+    st.divider()
 
     # Headlines 
     st.subheader("Live News Headlines")
     for h, s in zip(headlines, scores):
-        color = "green" if s > 0 else "red" if s < 0 else "gray"
-        st.markdown(f":{color}[{s:+.3f}] {h}")
+        if s > 0.05:
+            st.markdown(f"🟢 `{s:+.3f}` {h}")
+        elif s < -0.05:
+            st.markdown(f"🔴 `{s:+.3f}` {h}")
+        else:
+            st.markdown(f"⚪ `{s:+.3f}` {h}")
 
     st.metric("Average Sentiment Score", f"{avg_sentiment:.3f}")
+
+    st.divider()
 
     # Price chart 
     st.subheader("1 Year Price Chart")
@@ -89,8 +143,12 @@ if st.button("Run Analysis"):
     plt.tight_layout()
     st.pyplot(fig1)
 
+    st.divider()
+
     # Backtest 
     st.subheader("Backtest Simulator")
+    st.caption("Simulates trading Rs 1,00,000 based on model predictions on the test set")
+
     test_dates = stock.iloc[len(stock) - len(y_test):].index
     test_prices = stock.loc[test_dates, "Close"].values
 
@@ -134,3 +192,6 @@ if st.button("Run Analysis"):
     ax2.legend()
     plt.tight_layout()
     st.pyplot(fig2)
+
+    st.divider()
+    st.caption("Built by Sanket Suri   |   Stock Sentiment Analyzer   |   AI/ML BYOP Project")
