@@ -24,14 +24,19 @@ st.info("First load may take 30 to 60 seconds on the free server. Subsequent run
 # Cached functions 
 
 @st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600)
 def get_stock_data(ticker):
-    stock = yf.download(ticker, period="1y", interval="1d", progress=False)
-    if stock.empty:
-        return None
-    stock.columns = stock.columns.get_level_values(0)
-    stock = stock[["Close"]].copy()
-    stock["Target"] = (stock["Close"].shift(-1) > stock["Close"]).astype(int)
-    return stock
+    for attempt in range(3):
+        try:
+            stock = yf.download(ticker, period="1y", interval="1d", progress=False)
+            if not stock.empty:
+                stock.columns = stock.columns.get_level_values(0)
+                stock = stock[["Close"]].copy()
+                stock["Target"] = (stock["Close"].shift(-1) > stock["Close"]).astype(int)
+                return stock
+        except Exception:
+            pass
+    return None
 
 @st.cache_data(ttl=1800)
 def get_headlines(query):
